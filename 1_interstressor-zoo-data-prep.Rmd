@@ -1,0 +1,345 @@
+---
+title: "InterStressor Zooplankton - data preparation"
+output: html_notebook
+author: James Orr
+---
+
+Organizing the zooplankton data from the InterStressor experiment. In this notebook I'll: 
+
+- load all the csv files 
+- merge them all into one data frame
+- clean up all the typos in the "class column"
+- finalize the completed data that will be used for all subsequent data analyses
+
+## Set up 
+
+```{r, echo=TRUE, results='hide'}
+# running in R version 4.3.1
+
+#### Clear  environment 
+rm(list = ls())         
+
+#### Required packages
+library(tidyverse)        # for general organisation
+```
+
+**Load data**
+
+There are 8 folders each with ~128 csv files. For each folder I want to download all csv files, do some organizing, and then merge into one dataframe. I'll set up a function that does this and then run a loop over the 8 folders. 
+
+```{r}
+###### Function for loading data ########
+data.loading <- function(path){
+  csv_files <- list.files(path, pattern = ".csv", full.names = TRUE)
+  temp_data_frame  <- data.frame()
+  for (file in csv_files) {
+    # Read the CSV file
+    data <- read.csv(file, stringsAsFactors = FALSE)
+    # Add a new variable with the file name
+    data$filename <- basename(file)
+    # Combine the data with the previously read files
+    temp_data_frame <- bind_rows(temp_data_frame, data)
+  }
+  return(temp_data_frame)
+  }
+
+# Run the function for all eight folders
+x2_T1_data <- data.loading("data/input/x2/T1_13_05_22/")
+x2_T2_data <- data.loading("data/input/x2/T2_18_05_22/")
+x2_T4_data <- data.loading("data/input/x2/T4_27_05_22/")
+x2_T5_data <- data.loading("data/input/x2/T5_01_06_22/")
+
+x4_T1_data <- data.loading("data/input/x4/T1_13_05_22/")
+x4_T2_data <- data.loading("data/input/x4/T2_18_05_22/")
+x4_T4_data <- data.loading("data/input/x4/T4_27_05_22/")
+x4_T5_data <- data.loading("data/input/x4/T5_01_06_22/")
+```
+
+**General cleaning**
+
+Now for each of these dataframes I'll add in a date, I'll remove Particle ID and I'll extract the mesocosm ID from the file name (it'll be the sX before the first underscore).
+
+```{r}
+###### Function for general cleaning ########
+data.cleaning <- function(data, date, lens){
+  temp_data <- data %>%
+    # create date variable
+    mutate(date = date) %>%
+    # create a lens variable
+    mutate(lens = lens) %>%
+    # get rid of Particle.ID
+    select(-Particle.ID) %>%
+    # extract everything before the first "_" in "filename" (this is mesocosm ID)
+    mutate(meso = as.numeric(str_remove(str_extract(.$filename, "^[^_]+"), "^s")))
+  return(temp_data)
+}
+
+# Run the function for all eight data frames
+x2_T1_data <- data.cleaning(x2_T1_data, "13/05/2022", "x2")
+x2_T2_data <- data.cleaning(x2_T2_data, "18/05/2022", "x2")
+x2_T4_data <- data.cleaning(x2_T4_data, "27/05/2022", "x2")
+x2_T5_data <- data.cleaning(x2_T5_data, "01/06/2022", "x2")
+
+x4_T1_data <- data.cleaning(x4_T1_data, "13/05/2022", "x4")
+x4_T2_data <- data.cleaning(x4_T2_data, "18/05/2022", "x4")
+x4_T4_data <- data.cleaning(x4_T4_data, "27/05/2022", "x4")
+x4_T5_data <- data.cleaning(x4_T5_data, "01/06/2022", "x4")
+```
+
+**Combine data frames**
+
+```{r}
+all_data <- rbind(x2_T1_data, x2_T2_data, x2_T4_data, x2_T5_data,
+                  x4_T1_data, x4_T2_data, x4_T4_data, x4_T5_data)
+rm(x2_T1_data, x2_T2_data, x2_T4_data, x2_T5_data,
+   x4_T1_data, x4_T2_data, x4_T4_data, x4_T5_data)
+```
+
+**Join in treatment data**
+
+```{r}
+interstressor_design <- read.csv("data/input/interstressor-design.csv")
+all_data <- left_join(all_data, interstressor_design, by = "meso")
+rm(interstressor_design)
+```
+
+**Clean up the ID names** 
+
+There are quite a few duplicates/typos in the class column: 
+
+```{r}
+table(all_data$Class)
+```
+I'll go through this table and clean it up 
+
+```{r}
+# first set everything to lower case
+all_data$Class <- tolower(all_data$Class)
+
+# go through taxa and standardize
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_alona", 
+                                                               "4x_alona"), 
+                         "alona")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_alona_abun", 
+                                                               "2x_alona_abundance", 
+                                                               "4x_alona_abundance"), 
+                         "alona_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_chydorus", 
+                                                               "4x_chydorus"), 
+                         "chydorus")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_chydorus_abun", 
+                                                               "2x_chydorus_abundance",
+                                                               "4x_chydorus_abun",
+                                                               "4x_chydorus_abundance"), 
+                         "chydorus_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_copepod_cyclopoids", 
+                                                               "2x_copepods_cyclopoid",
+                                                               "2x_copepods_cyclopoids",
+                                                               "4x_copepods_cyclopoids"), 
+                         "cyclopoida")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_copepod_cyclopoids_abun", 
+                                                               "2x_copepods_ciclopoids_abundance",
+                                                               "2x_copepods_cyclopoid_abun",
+                                                               "4x_copepods_cyclopoids_abundance"), 
+                         "cyclopoida_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_copepods_calanoids", 
+                                                               "2x_copepods_calenoid"), 
+                         "calanoida")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_copepods_calenoid_abun"), 
+                         "calanoida_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_daphnia",
+                                                               "2x_daphnia_magna",
+                                                               "2x_daphnia_sp"), 
+                         "daphnia")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_daphnia_abun",
+                                                               "2x_daphnia_abundance"), 
+                         "daphnia_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_ephippia",
+                                                               "4x_ephippia"), 
+                         "ephippia")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_ephippia_abun",
+                                                               "2x_ephippia_abundance",
+                                                               "4x_ephippia_abun"), 
+                         "ephippia_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_hexarthra",
+                                                               "2x_hexarthra_abun",
+                                                               "2x_hexarthra_abundance",
+                                                               "2x_hexartra_abundance",
+                                                               "unknown"), 
+                         "unknown/hexarthra")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_keratella_cochlearis",
+                                                               "4x_keratella_c"), 
+                         "keratella_cochlearis")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_keratella_c_abun",
+                                                               "4x_keratella_cochlearis_abun"), 
+                         "keratella_cochlearis_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_keratella_quadrata",
+                                                               "4x_keratella_q"), 
+                         "keratella_quadrata")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_keretella_quadrata_abun",
+                                                               "4x_k_quadrata_abundance",
+                                                               "k_quadrata_abundance"), 
+                         "keratella_quadrata_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_naupli",
+                                                               "4x_nauplii"), 
+                         "nauplius")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_nauplii_abun",
+                                                               "2x_nauplii_abundance",
+                                                               "2x_nauplii_top_side",
+                                                               "4x_nauplii_abundance"), 
+                         "nauplius_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_ostracods",
+                                                               "4x_ostracods"), 
+                         "ostracoda")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_ostracods_abundance",
+                                                               "ostracods_abundance"), 
+                         "ostracoda_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_pleuroxus"), 
+                         "pleuroxus")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_scapholeberis",
+                                                               "4x_scapholeberis"), 
+                         "scapholeberis")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_scapholeberis_abun",
+                                                               "2x_scapholeberis_abundance",
+                                                               "4x_scapholeberis_abundance"), 
+                         "scapholeberis_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_simocephalus"), 
+                         "simocephalus")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("2x_simocephalus_abun",
+                                                               "2x_simocephalus_abundance"), 
+                         "simocephalus_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_brachionus"), 
+                         "brachionus")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_cydoridae"), 
+                         "chydoridae")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_lecane"), 
+                         "lecane")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_lepadella"), 
+                         "lepadella")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_lepadella_abundance"), 
+                         "lepadella_abun")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_polyarthra"), 
+                         "polyarthra")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_testudinella"), 
+                         "testudinella")
+
+all_data$Class <-replace(all_data$Class, all_data$Class %in% c("4x_vorticella"), 
+                         "vorticella")
+```
+
+Should be all good now. Classes with the "_abun" mean that they can only be used for abundance data (i.e., not biomass)
+
+```{r}
+table(all_data$Class)
+```
+**Create a "Taxa" variable**
+
+Combine the classes of the same taxon (with and without "_abun") - to obtain the abundance of each taxon 
+
+```{r}
+all_data$Taxa <- all_data$Class 
+
+# Use gsub to remove "_abun" from the column
+all_data$Taxa <- gsub("_abun", "", all_data$Taxa)
+
+
+# option to remove polyarthra and unkown/hexarthra (this is aquatic vascular plant hair)
+all_data <- all_data %>%
+  filter(Taxa != "polyarthra") %>%
+  filter(Taxa != "unknown/hexarthra")
+
+table(all_data$Taxa)
+
+```
+
+**Add in Microscope data**
+
+These were the zooplankton (n = 101) that were too large to process in the flowcam. 
+
+```{r}
+# load the data
+micro <- read.csv("data/input/microscope/zooplankton_microscope>1mm.csv", header = T)
+
+# prepare the dataset 
+
+micro <- micro %>%
+  # select the columns we want
+  select(c(Date, Mesocosm, Species, 
+           C.Length..um., C.Width..um.)) %>%
+  # select the rows we want 
+  filter(Species != "N/A") %>%
+  filter(Species != "Empty")
+
+# fix species names 
+micro$Species <-replace(micro$Species, micro$Species %in% c("Cyclopoid"), 
+                         "cyclopoida")
+micro$Species <-replace(micro$Species, micro$Species %in% c("Daphnia"), 
+                         "daphnia")
+micro$Species <-replace(micro$Species, micro$Species %in% c("Ephippia\xca"), 
+                         "ephippia")
+micro$Species <-replace(micro$Species, micro$Species %in% c("Scap"), 
+                         "scapholeberis")
+micro$Species <-replace(micro$Species, micro$Species %in% c("Simo"), 
+                         "simocephalus")
+
+# standardize column names 
+micro <- micro %>%
+  rename(date = Date,
+         meso = Mesocosm,
+         Class = Species,
+         Length = C.Length..um.,
+         Width = C.Width..um.) %>%
+  mutate(Taxa = Class) %>%
+  mutate(filename = "zooplankton_microscope>1mm.csv") %>%
+  mutate(lens = "microscope")
+
+# add in experimental design data
+interstressor_design <- read.csv("data/input/interstressor-design.csv")
+micro <- left_join(micro, interstressor_design, by = "meso")
+rm(interstressor_design)
+
+# finally join this micro to the all_data 
+all_data <- rbind(all_data, micro)
+rm(micro)
+```
+
+
+**Save the full dataset**
+
+```{r}
+write.csv(all_data, "data/output/interstressor_zoo_raw.csv", row.names = F)
+```
+
+

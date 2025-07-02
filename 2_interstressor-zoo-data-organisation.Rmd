@@ -1,0 +1,347 @@
+---
+title: "InterStressor Zooplankton - data organisation"
+output: html_notebook
+author: James Orr
+---
+
+Notebook where I organize the data in two different ways: 
+
+1. Abundance community matrix - each row is a community from a sample (512 samples - 128 replicates, 4 timepoints) and each column contains species abundances, community metrics or experimental information. 
+
+2. Body mass data (from which we could get biomass data)
+
+
+## Set up 
+
+```{r, echo=TRUE, results='hide'}
+# running in R version 4.3.1
+
+#### Clear  environment 
+rm(list = ls())         
+
+#### Required packages
+library(tidyverse)        # for general organisation
+library(hillR)            # to calculate hill diversity 
+```
+
+**Load data**
+
+```{r}
+zoo_data <- read.csv("data/output/interstressor_zoo_raw.csv")
+```
+
+
+## Abundance Data
+
+**Summarize by sample** 
+
+```{r}
+zoo_data_summary <- zoo_data %>%
+  group_by(meso, Taxa, date, block, treatment_n, pesticides.P1, pesticides.P2,
+           nutrients.P1, nutrients.P2) %>%
+  summarise(abundance = n()) %>%
+  ungroup()
+```
+
+**Create variables for each taxa (pivot wider)** 
+
+```{r}
+zoo_data_summary <- zoo_data_summary %>%
+  pivot_wider(names_from = Taxa, values_from = abundance) 
+```
+
+**Make sure missing samples are set to 0 abundances**
+
+There should now be 128 x 4 = 512 rows in the dataframe (one row per sample). However, we only have 511, which means there was one samples that were empty (i.e., had no csv files for x2 and x4 and had no observations in the microscope file for that sample). We need to add these in so that this sample can be recorded as "0" for all of the zooplankton abundances. 
+
+```{r}
+#table(zoo_data_summary$meso)
+```
+
+We can see that mesocosm 53 only have 3 occurrences so this mesocosm has one out of the four samples that is completely empty. Looking at the data, we can see that for mesocosm 53 the 13/05/2022 is missing and therefore empty so let's add in a row with this information to the zoo_data_summary file. 
+
+```{r}
+#subset(zoo_data_summary, zoo_data_summary$meso == 53)
+
+meso_53_13_05_22 <- c(53, "13/05/2022", 4, 10, "yes", "yes", "yes", "yes", 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+zoo_data_summary <- rbind(zoo_data_summary, meso_53_13_05_22)
+rm(meso_53_13_05_22)
+```
+
+**Set all NAs to 0** 
+
+```{r}
+# Use mutate_all to replace all NAs with "0"
+zoo_data_summary <- zoo_data_summary %>%
+  mutate_all(~ifelse(is.na(.), 0, .))
+```
+
+**Add pulse data and convert taxa to numeric**
+
+```{r}
+# create factors for the two pulses 
+zoo_data_summary <- zoo_data_summary %>%
+  mutate(P1 = if_else(nutrients.P1 == "no" & pesticides.P1 == "no", "C",
+                               ifelse(nutrients.P1 == "yes" & pesticides.P1 == "no", "N", 
+                                       ifelse(nutrients.P1 == "no" & pesticides.P1 == "yes", "I",
+                                              "NI")))) %>%
+  mutate(P2 = if_else(nutrients.P2 == "no" & pesticides.P2 == "no", "C",
+                               ifelse(nutrients.P2 == "yes" & pesticides.P2 == "no", "N", 
+                                       ifelse(nutrients.P2 == "no" & pesticides.P2 == "yes", "I",
+                                              "NI"))))
+
+zoo_data_summary$P1 <- factor(zoo_data_summary$P1, 
+                              levels = c("C", "N", "I", "NI"))
+zoo_data_summary$P2 <- factor(zoo_data_summary$P2, 
+                              levels = c("C", "N", "I", "NI"))
+
+# convert abundances to numeric
+taxa_variables <- c("alona", "calanoida", "chydorus", "cyclopoida",
+                       "daphnia", "ephippia", "lepadella", "nauplius",
+                       "ostracoda", "scapholeberis", "vorticella",
+                       "keratella_quadrata", "simocephalus", "pleuroxus",
+                       "lecane", "keratella_cochlearis", "testudinella")
+for (var in taxa_variables) {
+  zoo_data_summary[[var]] <- as.numeric(zoo_data_summary[[var]])
+}
+
+rm(var)
+
+```
+
+Add in a day variable 
+
+```{r}
+# Assuming your "date" variable is in a format like "13/05/2022"
+zoo_data_summary$date <- as.Date(zoo_data_summary$date, format = "%d/%m/%Y")
+
+# Reference date (day 0 is the day before the first pulse)
+reference_date <- as.Date("09/05/2022", format = "%d/%m/%Y")
+
+# Create a new variable "day" with the difference in days
+zoo_data_summary$day <- as.numeric(difftime(zoo_data_summary$date, reference_date, units = "days"))
+
+# Also add in timepoint data 
+zoo_data_summary <- zoo_data_summary %>%
+  mutate(timepoint = if_else(day == 4, "1",
+                             if_else(day == 9, "2",
+                                      if_else(day == 18, "3", "4"))))
+
+rm(reference_date)
+```
+
+**Correct for slightly differing water volumes on sampling days**
+
+Water volume was measured for a random subset of 10 mesocosms at different points throughout the experiment, so for the four timepoints we are interested in we can appoximate the average water volume in mesocosms and adjust abundance values based on this
+
+Data for water volumes
+
+```{r}
+# load
+volume <- read.csv("data/input/water-volume-interstressor.csv")
+
+# assign dates to timepoints (not a perfect match, but almost perfect)
+volume$timepoint <- if_else(volume$Date == "10/05/22", "1",
+                            if_else(volume$Date == "17/05/22", "2",
+                                    if_else(volume$Date == "26/05/22", "3", 
+                                            if_else(volume$Date == "31/05/22", "4", "na"))))
+
+# calculate mean, sd and n 
+volume <- volume %>%
+  filter(timepoint != "na") %>%
+  group_by(timepoint) %>%
+  summarise(av_vol = mean(Volume_L), n = n(), sd = sd(Volume_L)) %>%
+  mutate(av_vol_mL = av_vol * 1000)
+
+volume_sub <- volume %>%
+  select(c(timepoint, av_vol_mL))
+  
+# av_vol_mL join to summary
+zoo_data_summary <- zoo_data_summary %>%
+  left_join(volume_sub)
+
+rm(volume, volume_sub)
+```
+
+800mL of water was collected. This was condensed into 50mL of ethanol and the data we have is from a 20mL subset. So we have 2/5th of 800mL = 320mL 
+
+So if there were 10 daphnia in a sample from a date that had a water volume of 30L we know that in 320mL there were 10 daphnia so in the entire 30000mL mesocosm there was 10/320 * 30000 = 937.5 Daphnia. 
+
+If there were 10 daphnia in a sample from a date that had a water volume of 28L we'll get a different total abundance. 10/320 * 28000 = 875 
+
+We can't report the results as per L as we have different L at different timepoints - instead we should probably report as per mesocosm
+
+So basically each abundance variable should be divided by 320 and then multiplied by av_vol_mL
+
+We actually have an important decision whether to use per litre or per mesocosm. This decision won't impact within timepoint analyses - but comparisons between timepoints will be influenced by this. As we would be correcting for different total water volumes. Using per litre or per mesocosm gives slightly different results in the PRCs (but nothing major). We should think logically about our system. If we think it is very slow and the species aren't impacted by densities then per mesocosm makes sense BUT if we think the system is fast and species are impacted by densities then we should report per L. I'd lean towards per L. 
+
+Yep, we'll go with per Litre 
+
+```{r}
+# per mesocosm 
+#zoo_data_summary <- zoo_data_summary %>%
+#  mutate(across(all_of(taxa_variables), ~ . / 320 * av_vol_mL))
+
+# per litre 
+zoo_data_summary <- zoo_data_summary %>%
+  mutate(across(all_of(taxa_variables), ~ . / 320 * 1000))
+```
+
+**What to do about ephippia** 
+
+Ephippia are eggs of cladocerans that are produced in response to stress. They shouldn't increase our measure of species richness or diversity. We don't know where of the cladocerans they are, but they are definitely ones that we already have. We should probably include them in total abundance. We expect them to respond in opposite ways to the cladocerans in the co-tolerance plots. 
+
+
+**Community metrics**
+
+- Total abundance is the sum of all taxa abundances. These taxa abundances are already expressed per L, so total abundance is also per L. 
+
+- Richness is the number of taxa with an abundance greater than 0.
+
+- Hill diversity is calculated using the `hill_taxa` function from the `hillR` package, with q = 1 being Hill-Shannon diversity and q = 2 being Hill-Simpson. See the shiny app for teaching students diversity indices at github.com/jamesaorr/diversity-shiny for more details. 
+
+
+```{r}
+# list of taxa without ephippia (for richness and diversity)
+taxa_variables_less_ephippia <- setdiff(taxa_variables, "ephippia")
+
+zoo_data_summary <- zoo_data_summary %>%
+  # total.abundance counts all of the abundances
+  mutate(total.abundance = rowSums(.[, taxa_variables, drop = FALSE])) %>%
+  # richness counts the number of rows with >0 abundance
+  mutate(richness = rowSums(.[, taxa_variables_less_ephippia] > 0)) %>%
+  # hill diversity (q=1, Hill-Shannon)
+  mutate(hill.shannon = apply(across(all_of(taxa_variables_less_ephippia)), 1, 
+                                function(row) hill_taxa(data.frame(row), q = 1))) %>%
+  # hill diversity (q=1, Hill-Simpson)
+  mutate(hill.simpson = apply(across(all_of(taxa_variables_less_ephippia)), 1, 
+                                function(row) hill_taxa(data.frame(row), q = 2)))
+  
+# note about the hill diversity code: This uses apply to apply the hill_taxa ..
+# .. function to each row of the selected columns. The data.frame(row) part .. 
+# .. ensures that the selected columns are treated as a data frame for each row.
+# .. the "1" in the apply function refers to the margin - it is saying apply to rows 
+
+# Set hill diversity to 0 when richness is 0
+zoo_data_summary <- zoo_data_summary %>%
+  mutate(hill.shannon = ifelse(richness == 0, 0, hill.shannon)) %>%
+  mutate(hill.simpson = ifelse(richness == 0, 0, hill.simpson))
+
+
+
+# Cladoceran abundance 
+zoo_data_summary <- zoo_data_summary %>%
+  rowwise() %>%
+  mutate(cladocerans = sum(c(daphnia, scapholeberis, simocephalus, 
+                             alona, chydorus, pleuroxus)))
+
+# Copepod abundance 
+zoo_data_summary <- zoo_data_summary %>%
+  rowwise() %>%
+  mutate(copepods = sum(c(calanoida, nauplius, cyclopoida)))
+
+# Rotifer abundance
+zoo_data_summary <- zoo_data_summary %>%
+  rowwise() %>%
+  mutate(rotifers = sum(c(lepadella, keratella_quadrata, keratella_cochlearis,
+                          lecane, testudinella)))
+```
+
+Add "treatment" variable 
+
+```{r}
+zoo_data_summary$treatment <- paste(zoo_data_summary$P1, zoo_data_summary$P2, sep = "_")
+```
+
+Read `zoo_data_summary` to use for univariate and multivaritate data analyses 
+
+```{r}
+write.csv(zoo_data_summary, "data/output/interstressor_zoo_summary.csv", row.names = F)
+
+```
+
+
+## Biomass Data 
+
+Based on a quick read of the literature it seems that there are several different options we could take. A very common approach is to use published taxon-specific **allometric equations**. E.g., using using length - weight regressions: 
+
+$$
+\mathrm{W}=\alpha \mathrm{L}^\beta
+$$
+
+$$
+\operatorname{Ln}(\mathrm{W})=\operatorname{Ln}(\alpha)+\beta \operatorname{Ln}(\mathrm{L})
+$$
+
+Where $W$ is weight in ug, $L$ is length in mm, and $\beta$ is the slope of the logarithmic relationship, and $Ln(\alpha)$ is the intercept. 
+
+This approach doesn't use width measurements. But seems very common and coefficients are available online, e.g., at: 
+https://ecommons.cornell.edu/server/api/core/bitstreams/a2e88948-a511-4dac-841a-9128e5bfa3eb/content
+
+```{r}
+#using coefficients from Cornell Standard L-W Equations
+
+# add in length-weight regression coefficients 
+#zoo_data <- zoo_data %>%
+#  mutate(
+#    log.alpha = case_when(
+#      Class == "daphnia" ~ 1.468,
+#      Class == "nauplius" ~ 1.953,
+#      Class == "cyclopoid" ~ 1.953,
+#      Class == "alona" ~ 3.391,
+#      Class == "chydorus" ~ 4.493,
+#      TRUE ~ NA_real_
+#    ),
+#    Beta = case_when(
+#      Class == "daphnia" ~ 2.83,
+#      Class == "nauplius" ~ 2.40,
+#      Class == "cyclopoid" ~ 2.40,
+#      Class == "alona" ~ 3.48,
+#      Class == "chydorus" ~ 3.93,
+#      TRUE ~ NA_real_
+#    ))
+
+#zoo_data <- zoo_data %>%
+#  # convert Length to mm (original was as um)
+#  mutate(Length_mm = Length/1000) %>% 
+#  # apply the formula to get ln(weight)
+#  mutate(ln.body.mass = log.alpha + Beta * log(Length_mm)) %>%
+#  # natural log of x is equal to e to the power of x
+#  mutate(body.mass_ug = exp(ln.body.mass)) 
+```
+
+Another option is to do what Dania has done before, which is assigning geometric shapes to the zooplankton and then calculating **biovolume** and then mass from there. 
+
+```{r}
+#zoo_data <- zoo_data %>%
+#  mutate(Biovolume = ifelse(Class %in% c("daphnia",
+#                                         "scapholeberis",
+#                                         "simocephalus", 
+#                                         "alona",
+#                                         "nauplius",
+#                                         "calanoida",
+#                                         "cyclopoid",
+#                                         "ostracoda",
+#                                         "chydorus",
+#                                         "pleuroxus"), 
+#                            (pi/6) * Width^2 * Length,
+#                            ifelse(Class %in% c("keratella_cochlearis",
+#                                                "keratella_quadrata",
+#                                                "lepadella",
+#                                                "lecane"),
+#                                   pi * (Width/2)^2 * Length,
+#                                   NA))) %>%
+#  mutate(BodyMass = Biovolume * 1.1 * 0.25) # in grams 
+
+```
+
+Assuming basic geometric shapes seems like a more general approach, while the allometric equations are more specific to the taxa. If allometric equations are available for our taxa that is presumably the way to go, as less assumptions are being made. But I really don't mind which way we go as long as we are consistent across all samples.
+
+
+
+
+
+
+

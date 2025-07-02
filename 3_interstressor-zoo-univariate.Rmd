@@ -1,0 +1,725 @@
+---
+title: "InterStressor Zooplankton - univariate responses"
+author: James Orr
+output:
+   html_notebook:
+     code_folding: show
+     theme: flatly
+     toc: true
+     toc_depth: 4
+     number_sections: no
+---
+
+In this notebook I'll create some figures based on species abundance data and community properties. 
+
+The experiment was designed to maximize the chances of seeing memory effects. We chose stressors that we expected to have dissimilar effects, so we are not expecting a strong positive co-tolerance. We also chose an interval between pulses that was short enough to prevent full recovery from the first pulse before the second pulse, we so we are expecting the stressors to have relatively long-lasting impacts on the communities. 
+
+
+So in this notebook we'll look at: 
+
+1. the co-tolerance relationship between the stressors
+
+2. the recovery trajectories (and legacy effects) following pulse one
+
+3. the memory effects of P1 on P2, by comparing the responses of communities with different stressor histories to the second pulses 
+
+
+## Set up 
+
+```{r, echo=TRUE, results='hide'}
+# running in R version 4.3.1
+
+#### clear  environment 
+rm(list = ls())         
+
+#### required packages
+library(tidyverse)        # for general organisation
+library(gridExtra)        # for aranging ggplots 
+library(weights)          # to calculate weighted correlations
+library(lme4)             # for mixed effects models
+library(lmerTest)         # to get p values for mixed effects models
+library(MuMIn)            # to get R2 for mixed effects models 
+library(DHARMa)           # diagnostics for mixed effects models 
+library(viridis)          # for colour palettes
+
+
+# my colours 
+C_col <- "#bdbdbd"
+N_col <- "#9bca3c"
+I_col <- "#436fb6"
+NI_col <- "#71c6a5"
+
+```
+
+Load data
+
+```{r}
+# load data from prevous notebook
+zoo_data_summary <- read.csv("data/output/interstressor_zoo_summary.csv")
+
+# shorten some taxa names (for co-tolerance plot)
+zoo_data_summary <- zoo_data_summary %>%
+  rename(
+    k_quadrata = keratella_quadrata,
+    k_cochlearis = keratella_cochlearis
+  )
+
+# list of taxa variables
+taxa_variables <- c("alona", "calanoida", "chydorus", "cyclopoida",
+                       "daphnia", "ephippia", "lepadella", "nauplius",
+                       "ostracoda", "scapholeberis", "vorticella",
+                       "k_quadrata", "simocephalus", "pleuroxus",
+                       "lecane", "k_cochlearis", "testudinella")
+
+```
+
+
+In the previous notebook I computed seven community-level metrics / aggregate properties for each sample: total abundance, richness, hill-shannon, hill-simpson, cladoceran abundance, rotifer abundance, and copepod abundance. It'll be nice to plot all of this data, but we'll probably just do stats on total abundance and one of the measures of diversity (keeping number of statistical tests low to avoid temptation of post hoc story telling and p hacking)
+
+
+First, we'll summarise the data (mean and standard deviation for each community metric for each sample) that we can then use for plots. For the plots we can make use of the fact that while there are 8 replicates of each treatment in T3 and T4, there are 32 replicates of each treatment in T1 and T2. So we can summarise the data for T1 and T2 separately from T3 and T4, and then combine them. 
+
+
+```{r}
+# mean and sd for all T1 and T2 (4 treatments, 32 replicates each)
+metrics_summarised_P1 <- zoo_data_summary %>%
+    filter(timepoint %in% c("1", "2")) %>%
+    group_by(timepoint, P1) %>%
+    summarise(rich_av = mean(richness),
+              rich_sd = sd(richness),
+              total_av = mean(total.abundance),
+              total_sd = sd(total.abundance),
+              shannon_av = mean(hill.shannon),
+              shannon_sd = sd(hill.shannon),
+              simpson_av = mean(hill.simpson),
+              simpson_sd = sd(hill.simpson),
+              clad_av = mean(cladocerans),
+              clad_sd = sd(cladocerans),
+              rot_av = mean(rotifers),
+              rot_sd = sd(rotifers),
+              cope_av = mean(copepods),
+              cope_sd = sd(copepods)) %>%
+    ungroup()
+
+# mean and sd for all T3 and T4 (16 treatments, 8 replicates each)
+metrics_summarised_P2 <- zoo_data_summary %>%
+    filter(timepoint %in% c("3", "4")) %>%
+    group_by(timepoint, treatment) %>%
+    summarise(rich_av = mean(richness),
+              rich_sd = sd(richness),
+              total_av = mean(total.abundance),
+              total_sd = sd(total.abundance),
+              shannon_av = mean(hill.shannon),
+              shannon_sd = sd(hill.shannon),
+              simpson_av = mean(hill.simpson),
+              simpson_sd = sd(hill.simpson),
+              clad_av = mean(cladocerans),
+              clad_sd = sd(cladocerans),
+              rot_av = mean(rotifers),
+              rot_sd = sd(rotifers),
+              cope_av = mean(copepods),
+              cope_sd = sd(copepods)) %>%
+    ungroup()
+
+
+# match column names and bind rows 
+plot_data <- metrics_summarised_P1 %>%
+  rename(treatment = P1) %>%
+  bind_rows(metrics_summarised_P2) %>%
+  separate(treatment, into = c("P1", "P2"), sep = "_", fill = "right", remove = FALSE)
+
+# set timepoint to a factor 
+plot_data$timepoint <- factor(plot_data$timepoint, levels = c("1", "2", "3", "4"))
+
+# clean environment
+rm(metrics_summarised_P1, metrics_summarised_P2) 
+```
+
+Create a function to plot all seven community metrics for a given subset of the data.
+
+```{r}
+plot_metrics <- function(plot_data, memory) {
+  
+  # variables to plot
+  variables <- c("total", "shannon", "simpson", "richness", 
+                 "cladocerans", "copepods", "rotifers")
+  av_variables <- c("total_av", "shannon_av", "simpson_av", "rich_av", 
+                    "clad_av", "cope_av", "rot_av")
+  sd_variables <- c("total_sd", "shannon_sd", "simpson_sd", "rich_sd",
+                    "clad_sd", "cope_sd", "rot_sd")
+  
+  # colours for each treatment (by P1)
+  cols <- c(C_col, I_col, N_col, NI_col)
+  
+  # create a list to store individual plots
+  plots_list <- list()
+  
+  # If memory == 1, we'll be using this function for the memory questions 
+  # so there will five points, not four, and we need to
+  # filter out the C_C treatment from the first part of the plot
+  if (memory == 1) {
+    plot_data_sub <- plot_data %>%
+      filter(treatment != "C_C")
+  }
+  else {
+    plot_data_sub <- plot_data
+  }
+  
+  # create separate plots for each variable
+  for (i in seq_along(variables)) {
+    plot <- ggplot(plot_data_sub, aes(x = timepoint, 
+                                  y = .data[[av_variables[i]]],
+                                  color = P1)) +
+      geom_point(size = 2,  position=position_dodge(width=0.35)) +  
+      geom_line(aes(group = P1), size = 0.5, position=position_dodge(width=0.35)) +
+      geom_errorbar(aes(ymin = .data[[av_variables[i]]] - .data[[sd_variables[i]]],
+                        ymax = .data[[av_variables[i]]] + .data[[sd_variables[i]]]), 
+                    width = 0, position=position_dodge(width=0.35)) +
+      scale_color_manual(values = cols) +
+      theme_minimal()
+      
+      # if memory is 1, then plot the "C_C" treatment in dark grey
+      if (memory == 1) {
+        cc_data <- plot_data %>% filter(treatment == "C_C")
+        plot <- plot +
+          geom_point(data = cc_data,
+                     aes(x = timepoint, y = .data[[av_variables[i]]]),
+                     color = "gray20",
+                     size = 2) +
+          geom_errorbar(data = cc_data,
+                        aes(x = timepoint,
+                            ymin = .data[[av_variables[i]]] - .data[[sd_variables[i]]],
+                            ymax = .data[[av_variables[i]]] + .data[[sd_variables[i]]],
+                            group = treatment),
+                        color = "gray20",
+                        width = 0)
+      }
+          
+        plots_list[[i]] <- plot
+    }
+  
+  # combine the individual plots into a grid
+  grid.arrange(grobs = plots_list, ncol = 4)
+  
+}
+```
+
+
+I want to quickly community composition, as stacked area plots, just to get a sense of what is going on undeneath these community metrics (e.g., maybe total abundance doesn't change, but the relative abundances of the species is changing). The proper multivariate stats will happen in the next notebook. We need to convert the zoo_data_summary to a long-format frame, where each row contains information for just one taxon (for the stacked area workflow). 
+
+When I came to this naively, I saw two options. 
+
+- Option 1: compute relative abundance for each mesocosm at each timepoint, then average across treatments. This seemed like the right way to go about it, treating each mesocosm as an independent unit and I would be getting "mean realtive abundances". However, I thought that these mean relative abundances might not add up to 100%, which might look odd in the stacked area plots. 
+
+- Option 2: get mean abundances for each taxa across mesocosms within a treatment for each timepoint, then compute relative abundances. This will definitely add up to 100%. However, the averaging occurs before computing the proportions, which might mask heterogeneity between replicates and mean abundances may be heavily skewed by outliers. G
+
+After reading up on it a bit, I decided to go with Option 1 as this seemed to be the best way to deal with variation in my data. Also, given the structure of my data, where all mesocosms have info for all taxa (i.e., 0s included), then option 1 does actually sum to 100%. The key idea is that the 0 values do contribute to the **mean** relative abundances across mesocosms. 
+
+
+```{r}
+
+##### Option 1 #######
+# relative abundances in each mesocosm
+# then average of those relative abundances
+zoo_long <- zoo_data_summary %>%
+  select(timepoint, treatment, meso, taxa_variables) %>%
+  pivot_longer(cols = taxa_variables,
+               names_to = "taxon",
+               values_to = "abundance") %>%
+  # relative abundance in each mesocosm
+  group_by(meso, timepoint) %>%
+  mutate(total = sum(abundance),
+         rel_abundance = abundance / total) %>%
+  ungroup() %>%
+  # mean relative abundances in a treatment per timepoint
+  group_by(timepoint, treatment, taxon) %>%
+  summarise(mean_rel_abundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+  separate(treatment, into = c("P1", "P2"), sep = "_", fill = "right", remove = FALSE)
+
+##### Option 2 #######
+# mean abundances of taxa across mesocosms in a treatment
+# then relative abundances
+#zoo_long_b <- zoo_data_summary %>%
+#  select(timepoint, treatment, meso, taxa_variables) %>%
+#  pivot_longer(cols = taxa_variables,
+#               names_to = "taxon",
+#               values_to = "abundance") %>%
+  # mean abundance in each treatment for each taxon
+#  group_by(treatment, timepoint, taxon) %>%
+#  summarise(mean_abundance = mean(abundance, na.rm = TRUE), .groups = "drop") %>%
+  # relative abundances 
+#  group_by(timepoint, treatment) %>%
+#  mutate(total = sum(mean_abundance),
+#         mean_rel_abundance = mean_abundance / total) %>%
+#  separate(treatment, into = c("P1", "P2"), sep = "_", fill = "right", remove = FALSE)
+
+# compare the two approaches 
+#zoo_long_sum <- zoo_long_a %>% 
+#  group_by(timepoint, treatment) %>%
+#  summarise(sum_rel_abundance = sum(mean_rel_abundance, na.rm = TRUE), .groups = "drop")
+#zoo_long_b_sum <- zoo_long_b %>% 
+#  group_by(timepoint, treatment) %>%
+#  summarise(sum_rel_abundance = sum(mean_rel_abundance, na.rm = TRUE), .groups = "drop")
+
+# all the relative proportions in a sample sum to 1, which I was confused by...
+# It is because all mesocosms have data for all taxa (even if 0)
+# and those 0s count when estimating mean relative abundance! 
+
+
+```
+
+Set up colours and order for the different taxa (for relative abundance stacked area plots). I wanted the different taxanomic groups to have clear separation on the colour gradient, but also to be distinct from each other.
+
+```{r}
+# order taxa by group 
+cladocerans <- c("alona", "chydorus", "daphnia", "simocephalus", "pleuroxus", "scapholeberis")
+copepods <- c("calanoida", "cyclopoida", "nauplius")
+rotifers <- c("lepadella", "lecane", "k_quadrata", "k_cochlearis", "testudinella")
+others <- c("ephippia", "ostracoda", "vorticella") 
+
+# combine into one ordered list and order the taxon variable 
+taxa_ordered <- c(cladocerans, copepods, rotifers, others)
+zoo_long$taxon <- factor(zoo_long$taxon, levels = taxa_ordered)
+
+# function to get equally spaced sub-palettes from full viridis range
+get_band <- function(start, end, n) {
+  full <- viridis(100, option = "D")
+  band_range <- full[round(seq(start, end, length.out = n))]
+  return(band_range)
+}
+
+# assign colours by slicing the palette into bands (gaps between groups)
+clad_colors  <- setNames(get_band(20, 30, length(cladocerans)), cladocerans) 
+cope_colors  <- setNames(get_band(40, 50, length(copepods)), copepods)      
+rot_colors   <- setNames(get_band(70, 80, length(rotifers)), rotifers)    
+other_colors <- setNames(get_band(90, 99, length(others)), others)         
+
+# combine all
+taxa_colors <- c(clad_colors, cope_colors, rot_colors, other_colors)
+
+# clean environment
+rm(clad_colors, cope_colors, rot_colors, other_colors, get_band,
+   cladocerans, copepods, rotifers, others)
+```
+
+
+
+
+## 1. Co-tolerance
+
+First, let's understand the co-tolerance of our community to the stressors. 
+
+How should we define the axes? If we just use absolute changes in abundance (i.e., difference to control) then more abundant species will have "stronger" responses. So it would be nice to have relative changes to the control. Size of the points can be the abundance of the taxa in control treatment. We can construct co-tolerance plots for separate timepoints. If we focus on the first two timepoints we can have 32 replicates per treatment, which will greatly strengthen our inferences. 
+
+*MacLenna et al 2021: "Individual species response to each of the individual stressors was calculated as:*
+
+$$
+\left(\left(x_{\text {stressor }}-x_{\text {control }}\right) / x_{\text {control }}\right) \times 100
+$$
+
+*where xstressor is the mean biomass of the taxon in the presence of the stressor on the final day of the experiment and xcontrol is the mean biomass of the taxon in the unstressed control on the final day of the experiment. Response was bound by zero because negative biomass was not possible but positive responses to the stressors were not bound by an upper limit. As a result, the distribution of responses was inherently right-skewed. To normalize the data and rescale them around zero, we applied the following transformation to responses (X), in accordance with the study by Kaiser et al. (2006):*
+
+$$
+Y=\ln (1+[X / 101])
+$$
+
+*As a result, responses to stressors represented a gradient with negative values indicating biomass loss and positive values indicating gains in biomass in the presence of the stressor. A response value of −4.6 showed loss of the taxon in the presence of the stressor, while a response value of +4.6 indicated a 100-fold increase in biomass. We were unable to calculate responses for rare taxa that were not detected in at least one stressor treatment and the control within a lake block, and these taxa were excluded from the analysis of co-tolerance. One-tailed Pearson’s correlations were used to test for positively correlated responses of taxa to warming and non-native trout based on the a priori expectation that the stressors would select for similar species.*
+
+Create a function that calculates responses to stressors for a given subset of the data.
+
+```{r}
+
+effect_calculation <- function(data) {
+  data %>%
+    # get mean abundances for each taxa in each treatment
+    group_by(P1) %>%
+    summarise(across(taxa_variables, mean)) %>%
+    # rearrange the data 
+    pivot_longer(cols = -P1, names_to = "taxa", values_to = "mean_value") %>%
+    spread(key = P1, value = mean_value) %>%
+    # drop taxa that had no observations in controls (we get Inf/Nan values)
+    filter(C > 0) %>%
+    # get responses to pesticides and nutrients 
+    mutate(pesticide_response = ((I - C) / C) * 100) %>%
+    mutate(nutrient_response = ((N - C) / C) * 100) %>%
+    mutate(pesticide_response_trans = log(1 + (pesticide_response / 101))) %>%
+    mutate(nutrient_response_trans = log(1 + (nutrient_response / 101)))
+}
+```
+
+Create a function that makes a co-tolerance plot using the data from effect_calculation. 
+
+```{r}
+cotolerance_plot <- function(data, title) {
+  
+  # Fit weighted linear model
+  weighted_model <- lm(nutrient_response_trans ~ pesticide_response_trans, 
+                       data = data, weights = C)
+  intercept <- coef(weighted_model)[1]
+  slope <- coef(weighted_model)[2]
+  
+  # co-tolerance plot with abline for weighted lm  
+  ggplot(data, aes(x = pesticide_response_trans, 
+                      y = nutrient_response_trans, 
+                      size = C, 
+                      label = taxa)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linewidth = 1,
+              color = rgb(0.3, 0.3, 1, 0.5), linetype = "dashed") +
+  geom_text_repel(aes(label = taxa), size = 4) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "Response to insecticide",
+       y = "Response to nutrients",
+       title = title) +
+  #xlim(-4.6, 4.6) +
+  #ylim(-4.6, 4.6) +
+  theme_bw() +
+  theme(legend.position = "none")
+}
+```
+
+Calculate the Pearson's correlation coefficient for the co-tolerance data using weighted and unweighted metrics.
+
+```{r}
+T1_effect <- effect_calculation(subset(zoo_data_summary, zoo_data_summary$timepoint == "1"))
+T2_effect <- effect_calculation(subset(zoo_data_summary, zoo_data_summary$timepoint == "2"))
+
+# unweighted correlation tests
+cor.test(T1_effect$pesticide_response_trans, T1_effect$nutrient_response_trans)
+cor.test(T2_effect$pesticide_response_trans, T2_effect$nutrient_response_trans)
+
+# weighted correlation tests 
+wtd.cor(T1_effect$pesticide_response_trans, 
+        T1_effect$nutrient_response_trans,
+        weight = T1_effect$C)
+
+wtd.cor(T2_effect$pesticide_response_trans, 
+        T2_effect$nutrient_response_trans,
+        weight = T2_effect$C)
+```
+
+```{r, fig.width=8, fig.height=5}
+
+p1 <- cotolerance_plot(T1_effect, "T1")
+p2 <- cotolerance_plot(T2_effect, "T2")
+
+grid.arrange(p1, p2, ncol = 2)
+
+rm(p1, p2, T1_effect, T2_effect, effect_calculation, cotolerance_plot)
+```
+**note: it would be nice to add uncertainty to these points**
+
+
+Our a priori hypothesis (and the reason why we chose these stressors for this study) was that there was no correlation between nutrients and insecticides for the zooplankton community based on their intrinsic species-level responses (i.e., responses in monoculture). Nutrients would maybe increase their abundance as there is more phytoplankton, so more food for the zooplankton. Insecticides on the other hand may reduce their abundance due to toxicity. Testing this in a community setting is hard because species interactions can have a strong impact. 
+
+At T1 (last day of the first pulse period), there is no co-tolerance (no statistically significant correlation, weighted or unweighted). At T2 four days after the pulse period, however, there is a postive co-tolerance (statistically significant positive correlation for both weighted and unweighted metrics). 
+
+I think that species interactions are modifying the net effect of the stressors on the zooplankton over time. If species are interacting with each other, then if one is perturbed in some way, the other species will "feel" that disturbance through indirect effects after some time. These indirect effects of the stressors mediated through species interactions may well have already been present at T1, but they are likely to be stronger at T2 than at T1.  
+
+Insecticide was expected to have a negative effect on some zooplankton taxa (and neutral on others), but after time it seems to have had a positive effect on some taxa perhaps through predatory release (e.g., of the macroinvertebrates/midges that we didn't sample). 
+
+Nutrients, on the other hand, were expected to have a positive effect on some zooplankton taxa (and negative on others), but after time enhanced competition may have led to negative effects on other zooplankton taxa. 
+
+There is obviously a lot more going on - from T1 to T2 there will be some recovery at play as the concentration of the insecticde will have reduced. Also, nutrients could have delayed impacts on zooplankton through changes in phytoplankton and biofilm communities. 
+
+In any case, the lack of a correlation at T1 supports our a priori hypothesis (we have two very different stressors) and gives us reason to believe the there may be interesting order and memory effects in our experiment. 
+
+
+If we want to dig into these co-tolerance plots further (although this would be exploratory data analysis to set up future hypotheses) we could also: 
+
+- plot changes in co-tolerances over time (for single stressors or both)
+- look at co-tolerance right up to T3 and T4 (when P2 = control), although we'll have a much smaller sample size - just 8 rather than 32, so that may be less reliable data. 
+- look at co-tolerance for the second pulse only in T3 and T4 (when P1 = control), again less samples to use though, so probably no need. 
+
+
+
+
+## 2. Recovery 
+
+### Community metrics
+
+Let's start by looking at the long term impacts of the stressors, by exploring the trajectory of the communities following the first pulse only (T1 and T2 have 32 replicates, T3 and T4 have 8 replicates). 
+
+
+```{r, fig.width=10, fig.height=4}
+plot_data %>%
+  filter(P2 %in% c("C", NA)) %>%
+  plot_metrics(., 0)      # function I defined above, 0 means not a memory plot
+```
+
+
+Looks like insecticide might have had an initial impact on diversity and a delayed impact on total abundance (maybe driven through copepods). 
+
+Nutrients didn't seem to have any impact at first, but by T4 it seemed to have increased diversity.
+
+Big impact of time (see how control shifts over time. Abundance, richness, and diversity all seem to steadily increase from T1 to T4.
+
+I guess I could plot the treatments relative to the control to account for the temporal changes over time, but this might hide important info and I'd need to think carefully how to represent error/uncertainty. 
+
+
+
+### Composition 
+
+Community composition changes over time, and potential recovery from the first pulse or dealyed impacts
+
+```{r}
+recovery_comp <- zoo_long %>%
+  filter(P2 == "C") 
+
+ggplot(recovery_comp, aes(x = timepoint, y = mean_rel_abundance, fill = taxon)) +
+  geom_area() +
+  facet_wrap(~ P1, ncol = 4) +
+  labs(x = "Timepoint", y = "Relative abundance", fill = "Taxon") +
+  scale_fill_manual(values = taxa_colors) +
+  theme_minimal()
+
+rm(recovery_comp)
+```
+
+Pretty hard to interpret. Insecticide clearly more diverse at T1, then the copepods come back into the picture. Nutrients matches control apart from minor details.  Copepods seem to do very well over time in the NI treatment - outcompeting rotifers over time (as the insecticide decays). Competitive release going on with insecticide? Copepods reduced, and this gives room to the rotifers and cladocerans potentially? 
+
+
+### Univariate stats for recovery 
+
+With only four timepoints, it doesn't really make sense to try something like GAMs or models with a temporal autocorrelation structure. Instead, I'll model timepoint as a fixed effect and mesocosm as a random effect (basically categorical model comparing everything to control at T1). 
+
+These models focus on mesocosms that received no second pulse stressors (P2 = "C"), to isolate the legacy effects of the first pulse stressors (P1). This means we are just using a smaller subset of the data: four treatments (8 replicates each) each sampled four times. In the plots above we used all data for T1 and T2, as the second pulse hadn't happend so the treatments hadn't diverged yet, but for this model we want a balanced design as we are using mesocosm as a random effect. 
+
+The models are pretty simple, just the pesticides.P1 * nutrients.P1 * timepoint, with a random intercept for mesocosms. All the fixed effects are categorical factors, and are all being compared to the control at timepoint 1. Interpretation: 
+
+- Individual effects of the stressors are their effects at timepont 1. 
+- Individual effects for the timepoints (2, 3 and 4) say how the control differs from timepoint 1. 
+- A two way interaction between a stressor and a timepiont tells us how the effect of that stressor changes over time (recovery or delayed effects depending on direction of effect). 
+- Three-way interactions are more complex, how the interaction of nutrients and pesticides changes over time. 
+
+```{r}
+recovery_data <- zoo_data_summary %>%
+  filter(P2 %in% c("C")) 
+
+abun_mod <- lmer(log(total.abundance) ~ pesticides.P1 * nutrients.P1 * factor(timepoint) + (1 | meso),
+              data = recovery_data)
+
+shan_mod <- lmer(hill.shannon ~ pesticides.P1 * nutrients.P1 * factor(timepoint) + (1 | meso),
+              data = recovery_data)
+
+summary(abun_mod)
+summary(shan_mod)
+
+
+### model diagnostics with dharma (all looking good) ###
+#abun_res <- simulateResiduals(fittedModel = abun_mod, n = 1000)
+#shan_res <- simulateResiduals(fittedModel = shan_mod, n = 1000)
+#plot(abun_res)
+#plot(shan_res)
+
+```
+
+Recovery/legacy in total abundance: 
+
+- no effects of the stressors at T1 
+- abundance does increase over time in the controls (particularly T3 and T4)
+- pesticides have a delayed impact, and increase abundance in T3
+- no effect of nutrients on total abundance
+
+Recovery/Legacy in Shannon diversity 
+
+- pesticides have an effect on diversity already in T1. 
+- diversity increases over time in the controls (particularly T3 and T4)
+- there is recovery to pesticides already by T2 (T3 and T4 remain close to the control) 
+- there is a delayed effect of nutrients, it increases diversity but only at T4. 
+
+
+
+
+## 3. Memory effects
+
+We are interested in: 
+
+- How does stressor history influence responses to insecticide pulse? 
+- How does stressor history influence responses to nutrient pulse? 
+- How does stressor history influence responses to insecticide+nutrient pulse? 
+
+Note that stressor history in our study is really rich and diverse - we can test trans (different stressor) and cis (same stressor) memory effects. 
+
+First identify the subsets of relevant treatments for each of these memory questions that we can use for plots. 
+
+```{r}
+I <- c("C_I", "I_I", "N_I", "NI_I", "C_C")        # Insecticide 2nd pulse
+N <- c("C_N", "I_N", "N_N", "NI_N", "C_C")        # Nutrients 2nd pulse
+NI <- c("C_NI", "I_NI", "N_NI", "NI_NI", "C_C")   # Both 2nd pulse
+```
+
+#### Memory modifying insecticide
+
+
+```{r, fig.width=10, fig.height=4}
+plot_data %>%
+  filter(treatment %in% I) %>%
+  plot_metrics(., 1)      # function I defined earlier, 1 means this is a memory plot (so C_C is in black)
+```
+
+Interpretation: apart from the "C_C" true controls in black, all other data points had the same treatments in the second pulse (here it is insecticide)
+
+- If insecticide has an effect on the community metric, the light grey and dark grey points will be different. It looks like in the second pulse, insecticide increases diversity, and decreases the abundance of copepods. 
+
+- If the effect of insecticide is modified by the first pulse, the points of the different colours will be spread out. In general it looks like there aren't very consistent/strong memory effects at this aggregate community level for both time points. But more formal stats (below) will definitely help us tease out effects that may be hard to see in these plots. 
+
+
+```{r}
+I_comp <- zoo_long %>%
+  filter(treatment %in% I) %>%
+  filter(timepoint %in% c(3, 4))
+
+ggplot(I_comp, aes(x = timepoint, y = mean_rel_abundance, fill = taxon)) +
+  geom_area() +
+  facet_wrap(~ treatment, ncol = 5) +
+  labs(x = "Timepoint", y = "Relative abundance", fill = "Taxon") +
+  scale_fill_manual(values = taxa_colors) +
+  theme_minimal()
+
+rm(I_comp)
+```
+
+You can see the strong effect that insecitcides had on copepods, and how this releases rotifers (by comparing C_C to all other panels). Prior exposure to nutrients might modify this effect, but it's hard to tell. 
+
+
+
+#### Memory modifying nutrients
+
+```{r, fig.width=10, fig.height=4}
+plot_data %>%
+  filter(treatment %in% N) %>%
+  plot_metrics(., 1)
+```
+
+
+Nutrients in the second pulse doesn't have an impact on these community metrics at T3 and T4 (light grey and dark grey are very similar). This makes sense from looking at the recovery dynamics following nutrients in P1 - the effect of nutrients takes time to impact the community metrics (nutrients.P1 didn't have an impact until T4). 
+
+The memory effects are hard to interpret here as they may also reflect the delayed impacts of nutrients. Not really "memory". There is quite a spread, particularly for total abundance and diversity. 
+
+
+```{r}
+N_comp <- zoo_long %>%
+  filter(treatment %in% N) %>%
+  filter(timepoint %in% c(3, 4))
+
+ggplot(N_comp, aes(x = timepoint, y = mean_rel_abundance, fill = taxon)) +
+  geom_area() +
+  facet_wrap(~ treatment, ncol = 5) +
+  labs(x = "Timepoint", y = "Relative abundance", fill = "Taxon") +
+  scale_fill_manual(values = taxa_colors) +
+  theme_minimal()
+
+rm(N_comp)
+```
+
+
+#### Memory modifying combination
+
+
+```{r, fig.width=10, fig.height=4}
+plot_data %>%
+  filter(treatment %in% NI) %>%
+  plot_metrics(., 1)
+```
+
+
+Again we're seeing an insecticide effect here where copepods are being reduced and diversity is generally increasing. There does seem to be a lot more going on here, as the nutrients from the P1 are having legacy effects in T3 and T4, so this is hard to separate from potential memory effects. 
+
+
+
+```{r}
+NI_comp <- zoo_long %>%
+  filter(treatment %in% NI) %>%
+  filter(timepoint %in% c(3, 4))
+
+ggplot(NI_comp, aes(x = timepoint, y = mean_rel_abundance, fill = taxon)) +
+  geom_area() +
+  facet_wrap(~ treatment, ncol = 5) +
+  labs(x = "Timepoint", y = "Relative abundance", fill = "Taxon") +
+  scale_fill_manual(values = taxa_colors) +
+  theme_minimal()
+
+rm(NI_comp)
+```
+
+More going on here it seems. Nutrients having delayed impacts for sure. 
+
+
+
+
+
+#### Univariate stats for memory effects
+
+
+We don't want to do way too much stats (e.g., on every possible response variable, or for different subsets of the data) to avoid post hoc story telling and p hacking. I would suggest we just use one measure of diversity (e.g., Hill-Shannon) and total abundance as our two community metrics.
+
+We should use just one large model with both T3 and T4 data and include a random intercept for meso to account for repeated samppling (temporal pseudoreplication) and include timepoint as a fixed effect, so we can see temporal trends between T3 and T4. 
+
+Model will have pesticides.P1 * nutrients.P1 * pesticides.P2 * nutrients.P2 as fixed effects. Interpretation: 
+
+- **The main effects** is just the effect of each pulse on T3 and T4 communities. P1 main effects are legacy effects, while P2 main effects are more initial effects. We expect delayed effect of nutrients but instant effect of insecticides, so nutrients.P1 and pesticides.P2 might be significant (but not pesticides.P1 or nutrients.P2). 
+
+- **Two-way interactions between different stressors from the same pulse period** show potential stressor interactions (non-additive for hill and non-multiplicative for lot total abundance). e.g., pesticides.P1:nutrients.P1 might tell us something about stressor interactions, but this is very hard for community-level properties.  
+
+- **Two-way interactions between stressors from different pulses** show simple memory effects. Cis memory would be something like pesticides.P1:pesticides.P2 (e.g., community induced tolerance). Trans memory would be something like pesticides.P1:nutrients.P2 (e.g., did the effect of nutrients in P2 depend on pesticides in P1).  
+
+- **There-way and four-way interactions** are more complex, and reveal complex multi-stressor memory effects. E.g., a memory effect depended on the presence of another stressor if both P1 stressors are involved. 
+
+Note that these are again all categorical variables, and everything is being compared to the control (C_C) at T3. 
+
+
+
+Linear mixed effect model to test memory effects on (log) abundance:
+
+
+```{r}
+
+abun_mod <- lmer(log(total.abundance) ~ pesticides.P1 * nutrients.P1 * pesticides.P2 * nutrients.P2 + timepoint + (1 | meso),
+              data = subset(zoo_data_summary, zoo_data_summary$timepoint %in% c(3, 4)))
+
+summary(abun_mod)
+r.squaredGLMM(abun_mod)
+
+### model diagnostics with dharma (all looking good) ###
+#abun_res <- simulateResiduals(fittedModel = abun_mod, n = 1000)
+#plot(abun_res)
+```
+
+No statistically significant effects apart from timepoint - i.e., there is an increase in total abundance between T3 and T4. 
+
+
+
+Linear mixed effect model to test memory effects on hill diversity
+
+
+```{r}
+shan_mod <- lmer(hill.shannon ~ pesticides.P1 * nutrients.P1 * pesticides.P2 * nutrients.P2 + timepoint + (1 | meso),
+              data = subset(zoo_data_summary, zoo_data_summary$timepoint %in% c(3, 4)))
+
+summary(shan_mod)
+r.squaredGLMM(shan_mod)
+
+### model diagnostics with dharma (all looking good) ###
+#shan_mod <- simulateResiduals(fittedModel = shan_mod, n = 1000)
+#plot(shan_mod)
+
+```
+
+A couple of cool effects here! 
+
+nutrients.P1yes tells us there is a delayed impact of nutrients on diversity (see recovery trajectory for confirmation of this), which could be related to bottom-up effects. 
+
+nutrients.P1yes:nutrients.P2yes indicates that the effect of nutrients in P2 is modified by the presence of nutrients in P1, which is a memory effect. Nutrients in P1 increased diversity in T3/T4, but adding in nutrients again removed this increase in diversity - stress-subsidy idea, humped shaped stressor-response. Supports the idea that diversity as a function of increasing nutrients is hump shaped. In other words, nutrients in P2 had no effect on diversity, unless nutrients in P1 were present, perhaps become toxic/anoxic for thh zooplankton, creating a direct negative impact. 
+
+pesticides.P1yes:nutrients.P1yes:nutrients.P2yes indicates that the effect of nutrients in P2 is modified by the presence of nutrients in P1 **and** pesticides in P1, which is a more complex multi-stressor memory effect. The modifying effect of P1 nutrients on P2 nutrient responses (which was statitsically significant) is itself modified by the presence of P1 pesticides.
+
+^ these statistically significant effects are all nested, which makes interpreting them a bit more straightforward from a biological perspective: 
+
+- nutrients in P1 increases diversity in T3/T4 (delayed impact, perhaps mediated by species interactions like grazing)
+- nutrients in P2 removes the diversity gain of nutrients in P1 (perhaps supporting stress-subsidy and potential hump-shaped stressor-response, directly on zooplankton)
+- pesticides in P1 impacts this memory effect in some complex way, effectively increasing diversity. 
+
+**Might be nice to have a marginal effects plot to explore this three-way memory interaction**
+

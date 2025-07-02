@@ -1,0 +1,523 @@
+---
+title: "InterStressor Zooplankton - multivariate responses"
+output: html_notebook
+author: James Orr
+---
+
+In this notebook I'll perform multivariate analyses on the interstressor zooplankton data. 
+
+Univariate responses collapse the multi-dimensional species community responses down to single numbers, so we also want to look at how community composition changes using a multivariate approach. There did seem to be some interesting compositional changes going on when we looked at exploratory stacked area plots in the previous notebook, and pooling taxa in copepods, rotifers, and cladocerans did seem to reveal inter-group interactive effects. 
+
+Again we're interested in examining recovery/legacy and we're interested in testing for memory effects. 
+
+Here we'll use a combination of: 
+- Principal response curves
+- RDA for given timepoints 
+- PERMANOVA to test if groups are different (based on distances in RDA space)
+- post hoc pairwise comparisons 
+
+## Set up 
+
+```{r, echo=TRUE, results='hide'}
+# running in R version 4.3.1
+
+#### clear  environment 
+rm(list = ls())         
+
+#### required packages
+library(tidyverse)        # for general organisation
+library(gridExtra)        # for aranging ggplots 
+library(vegan)            # for multivariate analyses 
+library(pairwiseAdonis)   # for pairwise comparisons after PERMANOVA 
+library(weights)          # to calculate weighted correlations
+
+# my colours 
+C_col <- "#5c5c5c"
+N_col <- "#9bca3c"
+I_col <- "#436fb6"
+NI_col <- "#71c6a5"
+
+```
+
+Load data
+
+```{r}
+zoo_data_summary <- read.csv("data/output/interstressor_zoo_summary.csv")
+
+taxa_variables <- c("alona", "calanoida", "chydorus", "cyclopoida",
+                       "daphnia", "ephippia", "lepadella", "nauplius",
+                       "ostracoda", "scapholeberis", "vorticella",
+                       "keratella_quadrata", "simocephalus", "pleuroxus",
+                       "lecane", "keratella_cochlearis", "testudinella")
+
+abundant_taxa <- c("alona", "chydorus", "cyclopoida", "daphnia", "ephippia", 
+                  "lepadella", "nauplius", "scapholeberis", 
+                  "keratella_quadrata", "simocephalus",
+                  "keratella_cochlearis")
+```
+
+Identify the treatments that are central to our main questions
+
+```{r}
+R <- c("C_C", "I_C", "N_C", "NI_C")               # recovery 
+I <- c("C_C", "C_I", "I_I", "N_I", "NI_I")        # Insecticide 2nd pulse
+N <- c("C_C", "C_N", "I_N", "N_N", "NI_N")        # Nutrients 2nd pulse
+NI <- c("C_C", "C_NI", "I_NI", "N_NI", "NI_NI")   # Both 2nd pulse
+```
+
+To have a rough idea what sort of data transformation to go with examine the range of the abundances in the community matrix with various transformations. It is very subjective but you sometimes see a "rule of thumb that between 0 and 10 is a nice range so that abundant and rare species can be considered - when relative abundance and community composition are both of interest)
+
+```{r}
+community <- zoo_data_summary %>%
+    select(all_of(taxa_variables))
+  
+range(community)                # raw data
+range(log(community +1))        # log + 1 
+range(community^0.5)            # square root
+range(community^0.25)           # fourth root 
+```
+
+log + 1 and fourth root both seem like good options to go with 
+
+
+## Principal response curves
+
+We can use these curves to show: 
+
+- recovery dynamics (C_C, I_C, N_C, NI_C)
+- memory effects at the second pulse 
+
+The idea is for the control, insecticide, nutrients and insecticde + nutrients treatment, we want to get an idea for total recovery time. So we are interested in the four treatments that had this in the first pulse but were control in the second pulse. So P2 == C
+
+Four timepoints, four treatments, 8 replicates each = 128 observations 
+
+For the prc function in R we need three objects: 
+
+- response: the community data (128 rows and columns for each species - this datatable will need to be log transformed as we are dealing with count data)
+
+- treatment: a vector of 128 length containing the factor levels for the treatment for each row 
+
+- time: a vector of 128 length containing the factor levels for time for each row
+
+**Note on transformation of the data**: Log transform is the most straightforward approach (ln(x + 1)) - but sometimes scaling is done to downweigh very abundant taxa. Van de Brink et al 2000 (https://doi.org/10.1016/S0166-445X(99)00037-5) has advice about this. 
+
+*"Before univariate and multivariate analyses, the abundance values of the zooplankton, phytoplankton and periphyton communities were, respectively, ln(10x+1), ln(0.001x+1) and ln(x+1) transformed, where x stands for the abundance value. We deviated from the usual ln(x+1) transformation because the data set frequently showed low or high abundance values (i.e. 0.2 individuals per litre for the zooplankton and 1000 individuals per litre for the phytoplankton community). We decided that the factor Ax in the ln(Ax+1) transformation should make 2 by taking the lowest abundance value higher than zero for x. A factor of two was chosen to avoid false discrepancy between zero abundance values and low abundance values. Since the lowest abundance value higher than zero in the zooplankton data sets was 0.2, a factor 10 was used. A factor of 0.001 and 1 was suitable for the phytoplankton and periphyton data set, respectively."*
+
+We don't want to dive into those weeds! Just stick with ln(x+1) 
+
+### Recovery PRC
+
+```{r}
+recovery_data <- zoo_data_summary %>%
+    filter(treatment %in% R | timepoint %in% c("1", "2"))
+
+community <- recovery_data %>%
+  select(all_of(taxa_variables))
+  
+# apply ln + 1 transformation as this is count data
+community <- log(community +1)
+  
+treatment <- as.factor(recovery_data$P1)
+  
+time <- as.factor(recovery_data$timepoint)
+  
+recovery_model <- prc(community, treatment = treatment, time = time)
+
+```
+
+Let's start with the the "recovery_model" - which is the 4 treatments that are C in the second pulse. We wanted to use a PRC to see if there was recovery back towards the control by T5. I'll walk through this very slowly, explaining everything and then we can apply the ideas and code to the other more interesting models. 
+
+Timepoints 1 and 2 are based on 32 replicates and timepoints 3 and 4 have 8 replicates 
+
+
+```{r}
+recovery_model
+
+# proportion of modelled variance explained by first axis
+recovery_model$CCA$eig[1] / sum(recovery_model$CCA$eig) * 100
+
+# summary of the model giving you species scores and the site/treatment scores over time
+summary(recovery_model)
+```
+
+The output is generally the same as an RDA. Some key points: 
+
+- The "Constrained" variance is the variance explained by the treatment + treatment x time interaction - here is is only ~6% which seems very low
+- The "Conditional" variance is the variance explained by time (that we have partialled out) - here it is ~16% 
+- The "Unconstrained" variance is the residule variance that we haven't explained (~77%)
+- So for this model, the total amount of variance explained is ~23%
+- The "Eigenvalues for constrained axes" gives you the proportion of the modelled variance explained by each axis. So the first axis, the one that we are visualizing, explains 52% of the variation.  
+
+What we're seeing is that the effect of time is much much larger than the effect of treatments for these data. 
+
+Plotting can be done: 
+
+```{r, fig.width=4, fig.height=4}
+plot(recovery_model, type = "b", pch = 19, species = F,
+     col = c(I_col, N_col, NI_col),
+     legpos = "bottomright",
+     lty = 2)
+
+# species = F                                        will remove species scores 
+# select = abs(summary(recovery_model)$sp) > 1       will only show species with scores above 1  
+```
+
+### Memory questions
+
+```{r}
+# create function that takes a set of treatments and returns a prc for it 
+
+prc_function <- function(treatments) {
+  
+  # Include all data from T1 and T2
+  data <- zoo_data_summary %>%
+  filter(treatment %in% treatments | timepoint %in% c("1", "2")) %>%
+  mutate(group = if_else(treatment == "C_C",
+                         "baseline", P1))
+  
+  # Include only the treatments
+  #data <- zoo_data_summary %>%
+  #  filter(treatment %in% treatments) %>%
+  #  mutate(group = treatment)
+  
+  community <- data %>%
+    select(all_of(taxa_variables))
+  
+  # apply ln + 1 transformation as this is count data
+  community <- log(community +1)
+  
+  treatment <- as.factor(data$group)
+  
+  time <- as.factor(data$timepoint)
+  
+  prc_model <- prc(community, treatment = treatment, time = time)
+  
+  return(prc_model)
+  }
+```
+
+
+PRC model for the different "prming scenarios" 
+
+```{r}
+I_model <- prc_function(I)
+N_model <- prc_function(N)
+NI_model <- prc_function(NI)
+```
+
+```{r}
+I_model
+N_model
+NI_model
+```
+
+
+```{r, fig.width=4, fig.height=4}
+plot(I_model, type = "b", pch = 19, species = F,
+     col = c(C_col, I_col, N_col, NI_col),
+     legpos = "bottomright",
+     main = "I second pulse",
+     lty = 2)
+
+plot(N_model, type = "b", pch = 19, species = F,
+     col = c(C_col, I_col, N_col, NI_col),
+     legpos = "bottomright",
+     main = "N second pulse",
+     lty = 2)
+
+plot(NI_model, type = "b", pch = 19, species = F,
+     col = c(C_col, I_col, N_col, NI_col),
+     legpos = "bottomright",
+     main = "NI second pulse",
+     lty = 2)
+
+```
+
+## RDA and PERMANOVA for each timepoint
+
+### Recovery by timepoint
+
+```{r}
+
+recovery_timepoint <- function(time) {
+  
+  ###### Prepare the data ########
+  rda_data <- zoo_data_summary %>%
+      filter(treatment %in% R | timepoint %in% c("1", "2")) %>%
+      mutate(group = if_else(treatment == "C_C",
+                           "baseline", P1)) %>%
+      filter(timepoint == time)
+  
+  # extract and transform community matrix
+  community <- rda_data %>%
+      select(all_of(taxa_variables))
+  community2 <- community^(1/4)
+  community <- log(community +1)
+  
+  P1 <- as.factor(rda_data$P1)
+  
+  ###### Run the RDA for a given timepoint ########
+  rda_model <- rda(community ~ pesticides.P1 * nutrients.P1, data = rda_data)
+  rda_coords <- as.data.frame(scores(rda_model, display = "sites")) # coordinates
+  
+  
+  ##### Plot the RDA ########
+  
+  #### plot RDA #######
+  colors <- c(C_col, I_col, N_col, NI_col)
+  p1 <- ggplot(rda_coords, aes(x = RDA1, y = RDA2, col = P1)) +
+          geom_point() +
+          stat_ellipse(aes(group = P1, fill = P1), 
+                       alpha = 0.2, linewidth = 0.25, geom = "polygon") +
+          scale_color_manual(values = colors) +
+          scale_fill_manual(values = colors) +
+          theme_minimal()
+  
+  ###### Run the PERMANOVA #########
+  permanova <- adonis2(community2 ~ pesticides.P1 * nutrients.P1,
+                            data = rda_data, method = "bray",
+                            permutations = 2000)
+  
+  
+  ###### Check for dispersion between groups #########
+  dist <- vegdist(community2, method = "bray")
+  disp <- betadisper(dist, P1)
+  
+  
+  ##### run a Simper analysis #######
+  simp <- simper(community2, P1)
+  
+  # Return a named list
+  result_list <- list(p1 = p1, permanova = permanova, rda_model = rda_model,
+                      disp = disp, simp = simp)
+  
+  return(result_list)
+}
+```
+
+```{r}
+recovery_1 <- recovery_timepoint("1")
+recovery_2 <- recovery_timepoint("2")
+recovery_3 <- recovery_timepoint("3")
+recovery_4 <- recovery_timepoint("4")
+```
+
+```{r}
+# RDA plot
+recovery_1$p1
+recovery_2$p1
+recovery_3$p1
+recovery_4$p1
+```
+
+
+```{r}
+# RDA results
+recovery_1$rda_model
+recovery_2$rda_model
+recovery_3$rda_model
+recovery_4$rda_model
+```
+```{r}
+# PERMANOVA results
+recovery_1$permanova
+recovery_2$permanova
+recovery_3$permanova
+recovery_4$permanova
+```
+```{r}
+# Dispersion test results
+recovery_1$disp
+permutest(recovery_1$disp, permutations = how(nperm = 9999))
+permutest(recovery_2$disp, permutations = how(nperm = 9999))
+permutest(recovery_3$disp, permutations = how(nperm = 9999))
+permutest(recovery_4$disp, permutations = how(nperm = 9999))
+```
+
+```{r}
+# SIMPER results
+summary(recovery_1$simp)
+recovery_2$simp
+recovery_3$simp
+recovery_4$simp
+```
+
+
+### Memory by timepoint
+
+There are two ways of approaching these questions:
+
+- Do a PERMANOVA with just treatment and then do pairwise comparisons (if groups are different that just means that they have different responses based on their history)
+
+- Do A PERMANOVA with pesticides * nutrients (interpreting interactions in that setting is quite strange)
+
+I'm leaning towards the first example. 
+
+
+```{r}
+
+memory_timepoint <- function(time, question) {
+  
+  ###### Prepare the data ########
+  rda_data <- zoo_data_summary %>%
+    filter(treatment %in% question) %>%
+    filter(treatment != "C_C") %>%
+    filter(timepoint == time)
+  
+  # extract and transform community matrix
+  community <- rda_data %>%
+      select(all_of(taxa_variables))
+  community2 <- community^(1/4)
+  community <- log(community +1)
+  
+  #P1 <- as.factor(rda_data$P1)
+  treatment <- as.factor(rda_data$treatment)
+
+  
+  ###### Run the RDA for a given timepoint ########
+  rda_model <- rda(community ~ treatment, data = rda_data)
+  rda_coords <- as.data.frame(scores(rda_model, display = "sites")) # coordinates
+  
+  
+  ##### Plot the RDA ########
+  
+  #### plot RDA #######
+  #colors <- c("grey20", "grey70", I_col, N_col, NI_col)
+  colors <- c(C_col, I_col, N_col, NI_col)
+  p1 <- ggplot(rda_coords, aes(x = RDA1, y = RDA2, col = treatment)) +
+          geom_point() +
+          stat_ellipse(aes(group = treatment, fill = treatment), 
+                       alpha = 0.2, size = 0.25, geom = "polygon") +
+          scale_color_manual(values = colors) +
+          scale_fill_manual(values = colors) +
+          theme_minimal()
+  
+  ###### Run the PERMANOVA by just treatment #########
+  permanova <- adonis2(community2 ~ treatment,
+                            data = rda_data, method = "bray",
+                            permutations = 9999)
+
+  ## pairwise comparisons 
+  pairwise_results <- pairwise.adonis2(community ~ treatment,
+                            data = rda_data, method = "bray",
+                            permutations = 9999)
+
+  ####### Run PERMANOVA by pesticide * nutrient 
+  permanova_int <- adonis2(community2 ~ pesticides.P1 * nutrients.P1,
+                            data = rda_data, method = "bray",
+                            permutations = 9999)
+  
+  ###### Check for dispersion between groups #########
+  dist <- vegdist(community2, method = "bray")
+  disp <- betadisper(dist, treatment)
+  
+  # Return a named list
+  result_list <- list(p1 = p1, 
+                      rda_model = rda_model,
+                      permanova = permanova, 
+                      permanova_int = permanova_int,
+                      pairwise_results = pairwise_results,
+                      disp = disp)
+  
+  return(result_list)
+}
+```
+
+```{r}
+I_3 <- memory_timepoint("3", I)
+I_4 <- memory_timepoint("4", I)
+
+N_3 <- memory_timepoint("3", N)
+N_4 <- memory_timepoint("4", N)
+
+NI_3 <- memory_timepoint("3", NI)
+NI_4 <- memory_timepoint("4", NI)
+```
+
+### Response to insecticide
+
+```{r}
+I_3$rda_model
+I_4$rda_model
+
+I_3$permanova
+I_4$permanova
+
+permutest(I_3$disp, permutations = how(nperm = 9999))
+permutest(I_4$disp, permutations = how(nperm = 9999))
+
+I_3$pairwise_results
+I_4$pairwise_results
+
+I_3$permanova_int
+I_4$permanova_int
+
+I_3$p1
+I_4$p1
+```
+
+No memory effects - response to insecticides are consistent 
+
+### Response to nutrients
+
+```{r}
+N_3$rda_model
+N_4$rda_model
+
+N_3$permanova
+N_4$permanova
+
+N_3$pairwise_results
+N_4$pairwise_results
+
+permutest(N_3$disp, permutations = how(nperm = 9999))
+permutest(N_4$disp, permutations = how(nperm = 9999))
+
+N_3$permanova_int
+N_4$permanova_int
+
+N_3$p1
+N_4$p1
+```
+
+Effects start to appear in timepoint 4. There is a different between N_N and NI_N and a marginally significant difference between I_N and C_N - so it seems that pesticide has a legacy effect on responses to nutrients 
+
+### Response to nutrients and insecticide
+
+```{r}
+NI_3$rda_model
+NI_4$rda_model
+
+NI_3$permanova
+NI_4$permanova
+
+NI_3$pairwise_results
+NI_4$pairwise_results
+
+permutest(NI_3$disp, permutations = how(nperm = 9999))
+permutest(NI_4$disp, permutations = how(nperm = 9999))
+
+NI_3$permanova_int
+NI_4$permanova_int
+
+NI_3$p1
+NI_4$p1
+```
+
+In timepoint 3 there is a difference between: I_NI and N_NI and a marginally significant difference between C_NI and NI_NI 
+
+In timepoint 4 there is a difference between: C_NI and NI_NI and N_NI and NI_NI and a marginally significant difference between I_NI and N_NI 
+
+Log+1 transformation or a fourth root transformation produce almost identical results - go with fourth root based on Marti Anderson et al 2011 Ecology Letters - https://doi.org/10.1111/j.1461-0248.2010.01552.x 
+
+
+-------------------------
+
+If there is significant differences in the dispersion between groups, can i still report PERMANOVA results? 
+From stack overflow: *Anderson and Walsh (2013) considered this issue. I'll summarise their findings with respect to your question. ANOSIM is very sensitive to heterogeneity and the results of Anderson & Walsh would suggest that don't trust the ANOSIM results; they'll basically just tell you that there is some difference (be it in terms of location (differences in mean), dispersion (variances) or correlation structure), not that there is a location difference were a significant ANOSIM result be obtained. PERMANOVA (which is basically adonis()) was found to be largely unaffected by heterogeneity in Anderson & Walsh's simulations but only for balanced designs. For unbalanced designs PERMANOVA and ANOSIM were too liberal if the smaller group had greater dispersion, and too conservative if the larger group had greater dispersion. This result was especially so for ANOSIM. Basically, how much you can trust the results of your PERMANOVA depends on the balance in the design.*
+
+Anderson MJ, Walsh DCI. PERMANOVA, ANOSIM, and the Mantel test in the face of heterogeneous dispersions: What null hypothesis are you testing? Ecological monographs: http://doi.org/10.1890/12-2010.1.
+
+For a balanced study design I should be totally okay! We can test differences in location and in dispersion - cool! 
+
+

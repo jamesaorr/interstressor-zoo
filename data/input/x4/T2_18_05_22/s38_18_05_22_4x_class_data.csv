@@ -1,0 +1,23 @@
+Particle ID,Class,Length,Width
+1,4x_nauplii,180.6983,129.3322
+2,4x_nauplii,162.3533,120.1598
+3,4x_nauplii,178.8638,131.1668
+1,4x_keratella_q,213.7192,110.9873
+2,4x_keratella_q,208.2158,120.1598
+3,4x_keratella_q,189.8708,103.6492
+4,4x_keratella_q,232.0643,120.1598
+5,4x_keratella_q,215.5538,134.8357
+6,4x_keratella_q,243.0712,147.6773
+7,4x_keratella_q,211.8847,121.9943
+1,4x_keratella_c,224.7262,88.9733
+1,4x_nauplii_abundance,169.6912,114.6563
+2,4x_nauplii_abundance,162.3533,107.3183
+3,4x_nauplii_abundance,188.0362,103.6492
+4,4x_nauplii_abundance,156.8498,136.6703
+5,4x_nauplii_abundance,173.3603,105.4838
+1,4x_k_quadrata_abundance,248.5747,101.8148
+2,4x_k_quadrata_abundance,184.3673,76.1317
+3,4x_k_quadrata_abundance,156.8498,136.6703
+4,4x_k_quadrata_abundance,250.4093,103.6492
+5,4x_k_quadrata_abundance,211.8847,90.8077
+6,4x_k_quadrata_abundance,257.7473,92.6423
