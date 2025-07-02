@@ -35,6 +35,7 @@ rm(list = ls())
 #### required packages
 library(tidyverse)        # for general organisation
 library(gridExtra)        # for aranging ggplots 
+library(ggrepel)          # for text labels in ggplots
 library(weights)          # to calculate weighted correlations
 library(lme4)             # for mixed effects models
 library(lmerTest)         # to get p values for mixed effects models
